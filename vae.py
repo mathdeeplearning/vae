@@ -47,23 +47,23 @@ class VaeGMM(object):
 		self.s2 = 1.0 / (1.0 / self.sigma**2 + np.sum(self.phi, axis = 0))
 
 	def train(self, epsilon, iters):
-		elbo = []
-		elbo.append(self.elbo())
+
+		last = self.elbo()
 
 		# use cavi to update elbo until epsilon-convergence
 		for i in range(iters):
 
 			self.cavi()
 
-			elbo.append(self.elbo())
+			curr = self.elbo()
 
-			print("Iter[{}] elbo is: {}".format(i,elbo[i]))
+			print("Iter[{}] elbo is: {}-{}".format(i,curr,last))
 
-			if np.abs(elbo[-1] - elbo[-2]) <= epsilon:
+			if np.abs((curr - last)/last) <= epsilon:
 				print("Iter[{}] of convergence:".format(i))
 				break
 
-		return elbo
+			last = curr
 
 	def plot(self,size):
 		sns.set_style("whitegrid")
@@ -81,8 +81,10 @@ class VaeGMM(object):
 if __name__ == '__main__':
    
     number = 5000
-    clusters = 5
-    mu = np.array([1, 5, 7, 9, 15])
+    
+    clusters = 10
+    mu = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
     data = []
 
     for i in range(clusters):
@@ -93,8 +95,9 @@ if __name__ == '__main__':
 
     model = VaeGMM(data, clusters)
     
-    model.train(1e-3, 1000)
+    model.train(1e-7, number)
 
+    print("sampled means:",sorted(mu))
     print("converged_means:", sorted(model.m))
 
     model.plot(number)
