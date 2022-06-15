@@ -78,17 +78,9 @@ class VaeGMM(object):
 
 		plt.show()
 
-
-def draw_samples(num_guassian,mu,sample_num):
-	data = [np.random.normal(mu[i],1,sample_num) for i in range(num_guassian)]
-
-	# random.shuffle(data)
-
-	return np.concatenate(data)
-
 if __name__ == '__main__':
-   # generate data
-    number = 1000
+   
+    number = 5000
     clusters = 5
     mu = np.array([1, 5, 7, 9, 15])
     data = []
@@ -103,16 +95,6 @@ if __name__ == '__main__':
     
     model.train(1e-3, 1000)
 
-    print("converged_means:", model.m,model.s2)
+    print("converged_means:", sorted(model.m))
 
     model.plot(number)
-
-    # print(np.argmax(model.phi[-10:],axis=1))
-    # print(model.phi[-10:])
-
-
-
-
-
-
-
