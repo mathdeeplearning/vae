@@ -4,25 +4,30 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import norm
-from sklearn import mixture
 
 class EMModel(object):
-	def __init__(self,data,num_guassian):
+	def __init__(self,data,num_guassian,mean_init = None):
 		self.data = data
 		self.N = data.shape[0]
 		self.K = num_guassian
 
-		# 为每个样本初始化phi向量
-		self.phi = np.random.random([self.N,self.K])
+		self.phi = np.ones([self.N,self.K])/self.K
 
-		# 初始化高斯分量的权重
-		self.alpha = np.random.random(self.K)/self.K
+		self.alpha = np.ones(self.K)/self.K
 
-		# 初始化mu的均值
-		self.m = np.random.random(self.K)
+		# initialize menas by kemeans clusters
+		if mean_init == 'kmeans':
 
-		# 初始化mu的方差
-		self.s2 = np.random.random(self.K)
+			from sklearn.cluster import KMeans
+
+			km = KMeans(self.K).fit(data[:, None])
+			self.m = km.cluster_centers_ .reshape(-1)
+
+		else:
+			# initialize to samples mean
+			self.m = np.array([np.mean(self.data)] * self.K)
+
+		self.s2 = np.random.random_sample(self.K)
 
 	def elbo(self):
 		
@@ -30,8 +35,10 @@ class EMModel(object):
 
 		B = np.log(self.alpha + 1e-5) - 0.5 * np.log(self.s2 + 1e-5)
 
-		return np.sum(self.phi * (A + B))	
+		return np.sum(self.phi * (A + B))
 
+	def log_likehood(self):
+		...
 
 	def e_step(self):
 
@@ -48,13 +55,13 @@ class EMModel(object):
 	def m_step(self):
 		
 		# update alpha
-		self.alpha = (np.sum(self.phi,axis=0))/ self.N
+		self.alpha = np.mean(self.phi,axis = 0)
 
 		# update m
 		self.m = np.sum(self.phi * data[:,np.newaxis],axis=0)/(np.sum(self.phi,axis = 0))
 
 		# update s2
-		self.s2 = np.sum(self.phi * np.add.outer(self.data, -self.m) **2,axis=0)/ (np.sum(self.phi,axis = 0))
+		self.s2 = np.sum(self.phi * np.add.outer(self.data, -self.m) **2,axis = 0)/ (np.sum(self.phi,axis = 0))
 
 
 	def em_update(self):
@@ -96,36 +103,28 @@ class EMModel(object):
 if __name__ == '__main__':
    
 	number = 5000
-
-	clusters = 5
+	
 	mu = [1, 2, 3, 4, 5]
 
-	sigma = [2, 2, 2, 2, 2]
+	sigma = [1, 1, 1, 1, 1]
+
+	clusters = len(mu)
 
 	data = []
 
 	for i in range(clusters):
 		data.append(np.random.normal(mu[i], sigma[i], number))
 
-	# for i in range(clusters):
-	# 	d = np.random.randn(number)
-	# 	data.append(d * sigma[i] + mu[i])
-
 	# concatenate data
 	data = np.concatenate(np.array(data))
 
 	new_data = data.reshape(-1,1)
 
-	gmm = mixture.GaussianMixture(n_components=clusters, max_iter=5000, covariance_type='full').fit(new_data)
-
-	print('sk-means\n',sorted(gmm.means_.reshape(-1)))
-	print('sk-std\n',np.sqrt(gmm.covariances_).reshape(-1))
-
-	model = EMModel(data, clusters)
-
-	model.train(1e-5, number)
-
+	model = EMModel(data, clusters,'kmeans')
+	
+	model.train(1e-5, 10 * number)
+	
 	print("em-converged_means:\n", sorted(model.m))
 	print("em-converged_vars:\n",np.sqrt(model.s2))
 
-	# model.plot(number)
+	model.plot(number)

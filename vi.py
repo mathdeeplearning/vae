@@ -28,18 +28,18 @@ class VaeGMM(object):
 
 		B = -np.sum(self.m**2 + self.s2)/(2 * self.sigma**2)
 
-		D = -np.sum(np.log(self.phi))
+		D = - 0.5* np.sum(np.log(self.s2))
 
 		E = np.sum(self.phi * np.log(self.phi + 1e-5))
 
-		return np.sum(A) + B + D + E
+		return np.sum(A) + B - D - E
 
 	'''
 	坐标上升迭代变分推断
 	'''
 	def cavi(self):
-
 		e = np.outer(self.data, self.m) + (-0.5 * (self.m**2 + self.s2))[np.newaxis, :] 
+
 		self.phi = np.exp(e) / np.sum(np.exp(e), axis=1)[:, np.newaxis] 
 
 		self.m = np.sum(self.data[:, np.newaxis] * self.phi, axis=0)/(1.0 / self.sigma**2 + np.sum(self.phi, axis=0))
@@ -82,8 +82,9 @@ if __name__ == '__main__':
    
     number = 5000
     
-    clusters = 10
-    mu = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    mu = [1, 5, 8, 11, 15]
+    
+    clusters = len(mu)
 
     data = []
 
@@ -95,7 +96,7 @@ if __name__ == '__main__':
 
     model = VaeGMM(data, clusters)
     
-    model.train(1e-7, number)
+    model.train(1e-5, number)
 
     print("sampled means:",sorted(mu))
     print("converged_means:", sorted(model.m))
