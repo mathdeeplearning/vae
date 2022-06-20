@@ -4,6 +4,7 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import norm
+from sklearn import mixture
 
 class EMModel(object):
 	def __init__(self,data,num_guassian):
@@ -71,7 +72,7 @@ class EMModel(object):
 
 			curr = self.elbo()
 
-			print("Iter[{}] elbo : {}".format(i,curr))
+			# print("Iter[{}] elbo : {}".format(i,curr))
 
 			if np.abs(curr - last) <= epsilon:
 				print("Iter[{}] of convergence:".format(i))
@@ -97,21 +98,34 @@ if __name__ == '__main__':
 	number = 5000
 
 	clusters = 5
-	mu = [1, 2, 3, 4, 5,]
+	mu = [1, 2, 3, 4, 5]
+
+	sigma = [2, 2, 2, 2, 2]
 
 	data = []
 
 	for i in range(clusters):
-		data.append(np.random.normal(mu[i], 2, number))
+		data.append(np.random.normal(mu[i], sigma[i], number))
+
+	# for i in range(clusters):
+	# 	d = np.random.randn(number)
+	# 	data.append(d * sigma[i] + mu[i])
 
 	# concatenate data
 	data = np.concatenate(np.array(data))
+
+	new_data = data.reshape(-1,1)
+
+	gmm = mixture.GaussianMixture(n_components=clusters, max_iter=5000, covariance_type='full').fit(new_data)
+
+	print('sk-means\n',sorted(gmm.means_.reshape(-1)))
+	print('sk-std\n',np.sqrt(gmm.covariances_).reshape(-1))
 
 	model = EMModel(data, clusters)
 
 	model.train(1e-5, number)
 
-	print("converged_means:", sorted(model.m))
-	print("converged_vars:",model.s2)
+	print("em-converged_means:\n", sorted(model.m))
+	print("em-converged_vars:\n",np.sqrt(model.s2))
 
 	# model.plot(number)
