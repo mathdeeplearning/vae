@@ -104,7 +104,7 @@ if __name__ == '__main__':
    
 	number = 5000
 	
-	mu = [1, 2, 3, 4, 5]
+	mu = [1, 3, 5, 7, 9]
 
 	sigma = [1, 1, 1, 1, 1]
 
@@ -118,9 +118,7 @@ if __name__ == '__main__':
 	# concatenate data
 	data = np.concatenate(np.array(data))
 
-	new_data = data.reshape(-1,1)
-
-	model = EMModel(data, clusters,'kmeans')
+	model = EMModel(data, clusters)
 	
 	model.train(1e-5, 10 * number)
 	
