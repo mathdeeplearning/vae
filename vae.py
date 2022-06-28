@@ -1,6 +1,7 @@
 import argparse
 import parser
 import pathlib
+import os
 
 import torch
 import torch.nn as nn
@@ -26,25 +27,12 @@ def add_args(parser):
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--decoder_prob", choices=["b", "g"],default='b')
     parser.add_argument("--n_samples", type=int, default=1000)
+    parser.add_argument("--step", type=str, default='train')
     parser.add_argument("--data_dir", type=pathlib.Path, default="./data")
+    parser.add_argument("--model_dir", type=pathlib.Path, default="./model_data")
 
 '''
-	1、分布假设：
-		- p(z)  隐变量z的先验分布，假设为N(0,1)
-		- p(x|z) z的似然分布，也称为生成模型。可选择多变量伯努利分布或多变量高斯分布
-		- q(z|x) z的后验变分分布，假设为多变量高斯分布
-
-	2、ELBO = -DL(q(z|x)||p(z)) + sum_{l=1}^L log p(x|z_l)/L
-		- 第一项散度计算，与变量无关；第二项期望计算需通过采样完成
-		- 根据p(x|z)不同的假设，有不同的计算形式
-
-	3、Encoder：计算ELBO中的散度，结果与z无关
-		- 输入为784维度的手写图片，输出为q(z|x)的方差、均值
-
-	3、Decoder：计算ELBO中的期望
-		- 先从N(0,1)中采样，然后通过重参数化，转变为需要的分布，再计算log p(x|z)期望
-	
-	4、重参数化：从N(0,1)中采样z，通过平移、放缩变换 z' = m + s*z，变换为q(z|x)分布，其中m，s为q(z|x)的方差均值
+Encoder
 '''
 class Encoder(nn.Module):
 
@@ -61,11 +49,11 @@ class Encoder(nn.Module):
 
 	def forward(self, x):
 		x = self.encoder(x)
-		# 一层DNN得到均值方差
+
 		return x[:,:self.latent_dim], x[:,self.latent_dim:]
 
 '''
-Bernoulli分布假设，实际输出的是重建后的图片
+Bernoulli Decoder
 '''
 class BernoulliDecoder(nn.Module):
 	def __init__(self,latent_dim):
@@ -84,7 +72,7 @@ class BernoulliDecoder(nn.Module):
 		return self.decoder(x)
 
 '''
-高斯分布的似然概率，与Encoder相同，学习均值方差
+Gaussian Decoder
 '''
 class GaussianDecoder(nn.Module):
 	def __init__(self,latent_dim):
@@ -123,75 +111,55 @@ class VAE(nn.Module):
 
 		x = x.view(-1, 784)
 
-		# 一层DNN得到均值方差
+		# encode
 		encoder_mu, encoder_logvar = self.encoder(x)
 
-		# 训练的时候，根据每个样本，从正态分布采样，作重参数化
+		# 训练时重参数化采样
 		if self.training:
-			z = encoder_mu + torch.randn_like(encoder_mu)* torch.exp(0.5*encoder_logvar)
+			z = encoder_mu + torch.randn_like(encoder_mu)* torch.exp(0.5 * encoder_logvar)
 		else:
-			# 测试的时候，模型已经训练完毕，隐编码即为对应的期望
+			# 评估时，模型已稳定，均值可作为隐变量
 		 	z = encoder_mu
 
+		# decode
 		decoded_x = self.decoder(z)
 
-		return decoded_x, encoder_mu, encoder_logvar
+		return encoder_mu, encoder_logvar, decoded_x
 
 	def loss(self,x, decoded_x, encoder_mu, encoder_logvar):
 
-		# print("mu = ",encoder_mu)
-		# print("var = ",encoder_logvar)
 		x = x.view(-1,784)
 
 		loglikelihood = self.bernoulli_loglikelihood(x, decoded_x) if self.decoder_prob == 'b' else self.gaussian_loglikelihood(x, *decoded_x) 
 
 		return loglikelihood - self.KL(encoder_mu,encoder_logvar)
 
-	'''
-	Bernoulli分布log-likelihood等价于计算交叉熵
+	r'''
+	Bernoulli distribution log-likelihood(AEVE Page11 C.1)
+
+	Bernoulli的log似然与二分类交叉熵只差一个负号，decoder与其他生成模型一致
 	'''
 	def bernoulli_loglikelihood(self, x, decoded_x):
 		return F.binary_cross_entropy(input=decoded_x.view(-1, 784), target=x.view(-1, 784), reduction='sum')
 
 	'''
-	Gaussian分布log-likelihood需要x的维度与mu、logvar的维度一致才能计算，
-	原论文中提到，只有z的维度很小才能收敛，而x的维度是784，所以实际过程中难以收敛。
+	Gaussian distribution log-likelihood(AEVB Page11 C.2)
+
+	AEVB中提到，少量的隐变量可以收敛，隐变量过多不收敛。高斯分布需要设置与输入同等维度的隐变量，
+	经过训练过程并不收敛，具体表现为均值方差的参数很快变为nan；把网络设计的更复杂也可能收敛
 	'''
 	def gaussian_loglikelihood(self,x, mu, logvar):
-		print("mu = ",mu)
-		print("var = ",logvar)
-
 		return - 0.5 * torch.matmul((x - mu) * torch.exp( -logvar) , (x - mu).T).sum() - 0.5* 0.5 * 784 * torch.abs(torch.sum(logvar))
 
 	'''
-	ELBO中KL距离
+	KL Divergence(AEVB Page5)
+
+	KL计算仅依赖均值方差
 	'''
 	def KL(self, mu, logvar):
 		return 0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
-def plot(vae,device):
-	vae.eval()
-
-	with torch.no_grad():
-		z = torch.randn(50, cfg.latent_dim, device=device)
-
-		# Reconstruct images from sampled latent vectors
-		recon_images = vae.decoder(z)
-		recon_images = recon_images.view(recon_images.size(0), 1, 28, 28)
-		recon_images = recon_images.cpu()
-		recon_images = recon_images.clamp(0, 1)
-
-		# Plot Generated Images
-		plt.imshow(np.transpose(make_grid(recon_images, 10, 5).numpy(), (1, 2, 0)))	
-
-if __name__ == '__main__':
-	
-	parser = argparse.ArgumentParser()
-	add_args(parser)
-	cfg = parser.parse_args()
-
-	device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-	print(device)
+def train():
 
 	train_set = MNIST(root=cfg.data_dir, train=True, download=True, transform=transforms.ToTensor())
 	test_set  = MNIST(root=cfg.data_dir, train=False, download=True, transform=transforms.ToTensor())
@@ -222,7 +190,7 @@ if __name__ == '__main__':
 
 			optimizer.zero_grad()
 
-			decoded_x, encoder_mu, encoder_logvar = vae(x)
+			encoder_mu, encoder_logvar, decoded_x = vae(x)
 
 			loss = vae.loss(x, decoded_x, encoder_mu, encoder_logvar)
 
@@ -241,4 +209,49 @@ if __name__ == '__main__':
 		
 		print('Epoch [%d / %d] average reconstruction error: %f' % (epoch+1, cfg.epochs, losses[-1]))
 
-		plot(vae,device)
+		model_path = os.path.join(cfg.model_dir,"vae-{}.model".format(epoch+1))
+
+		torch.save(vae.state_dict(),model_path)
+
+def generate():
+
+	vae = VAE(cfg.decoder_prob)
+
+	model_path = os.path.join(cfg.model_dir,"vae-{}.model".format(50))
+
+	vae.load_state_dict(torch.load(model_path))
+
+	print("Loaded model from " + model_path)
+
+	vae.eval()
+
+	with torch.no_grad():
+		z = torch.randn(50, cfg.latent_dim, device=device)
+
+		# Reconstruct images from sampled latent vectors
+		recon_images = vae.decoder(z)
+		recon_images = recon_images.view(recon_images.size(0), 1, 28, 28)
+		recon_images = recon_images.cpu()
+		recon_images = recon_images.clamp(0, 1)
+
+		# Plot Generated Images
+		plt.imshow(np.transpose(make_grid(recon_images, 10, 5).numpy(), (1, 2, 0)))	
+
+		plt.show()
+
+if __name__ == '__main__':
+	
+	parser = argparse.ArgumentParser()
+	add_args(parser)
+	cfg = parser.parse_args()
+
+	device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+	print(device)
+
+	if cfg.step == 'train':
+		train()
+
+	elif cfg.step == 'gen':
+		generate()
+
