@@ -1,7 +1,10 @@
+#! -*- coding: utf-8 -*-
+
 import argparse
 import parser
 import pathlib
 import os
+import re
 
 import torch
 import torch.nn as nn
@@ -111,7 +114,6 @@ class VAE(nn.Module):
 
 		x = x.view(-1, 784)
 
-		# encode
 		encoder_mu, encoder_logvar = self.encoder(x)
 
 		# 训练时重参数化采样
@@ -121,7 +123,6 @@ class VAE(nn.Module):
 			# 评估时，模型已稳定，均值可作为隐变量
 		 	z = encoder_mu
 
-		# decode
 		decoded_x = self.decoder(z)
 
 		return encoder_mu, encoder_logvar, decoded_x
@@ -132,29 +133,30 @@ class VAE(nn.Module):
 
 		loglikelihood = self.bernoulli_loglikelihood(x, decoded_x) if self.decoder_prob == 'b' else self.gaussian_loglikelihood(x, *decoded_x) 
 
+		# loglikelihood - KL = -ELBO
 		return loglikelihood - self.KL(encoder_mu,encoder_logvar)
 
-	r'''
-	Bernoulli distribution log-likelihood(AEVE Page11 C.1)
+	'''
+		Bernoulli distribution log-likelihood(AEVE Page11 C.1)
 
-	Bernoulli的log似然与二分类交叉熵只差一个负号，decoder与其他生成模型一致
+		Bernoulli的log似然与二分类交叉熵只差一个负号，decoder与其他生成模型一致
 	'''
 	def bernoulli_loglikelihood(self, x, decoded_x):
 		return F.binary_cross_entropy(input=decoded_x.view(-1, 784), target=x.view(-1, 784), reduction='sum')
 
 	'''
-	Gaussian distribution log-likelihood(AEVB Page11 C.2)
+		Gaussian distribution log-likelihood(AEVB Page11 C.2)
 
-	AEVB中提到，少量的隐变量可以收敛，隐变量过多不收敛。高斯分布需要设置与输入同等维度的隐变量，
-	经过训练过程并不收敛，具体表现为均值方差的参数很快变为nan；把网络设计的更复杂也可能收敛
+		AEVB中提到，少量的隐变量可以收敛，隐变量过多不收敛。高斯分布需要设置与输入同等维度的隐变量，
+		经过训练过程并不收敛，具体表现为均值方差的参数很快变为nan；把网络设计的更复杂也可能收敛
 	'''
 	def gaussian_loglikelihood(self,x, mu, logvar):
 		return - 0.5 * torch.matmul((x - mu) * torch.exp( -logvar) , (x - mu).T).sum() - 0.5* 0.5 * 784 * torch.abs(torch.sum(logvar))
 
 	'''
-	KL Divergence(AEVB Page5)
+		KL Divergence(AEVB Page5)
 
-	KL计算仅依赖均值方差
+		KL计算仅依赖均值方差
 	'''
 	def KL(self, mu, logvar):
 		return 0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
@@ -217,7 +219,9 @@ def generate():
 
 	vae = VAE(cfg.decoder_prob)
 
-	model_path = os.path.join(cfg.model_dir,"vae-{}.model".format(50))
+	model_num = last_model_num(cfg.model_dir)
+
+	model_path = os.path.join(cfg.model_dir,"vae-{}.model".format(model_num))
 
 	vae.load_state_dict(torch.load(model_path))
 
@@ -238,6 +242,16 @@ def generate():
 		plt.imshow(np.transpose(make_grid(recon_images, 10, 5).numpy(), (1, 2, 0)))	
 
 		plt.show()
+
+def last_model_num(model_dir):
+
+	pattern = r'vae-(\d+)\.model'
+
+	model_names = filter(lambda fn: len(re.findall(pattern,fn)) == 1, os.listdir(model_dir))
+
+	nums = [int(re.findall(pattern,fn)[0]) for fn in model_names]
+
+	return max(nums) if len(nums) > 0 else None
 
 if __name__ == '__main__':
 	
