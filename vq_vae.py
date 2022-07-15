@@ -22,7 +22,7 @@ def add_args(parser):
 	parser.add_argument("--learning_rate", type=float, default=1e-3)
 	parser.add_argument("--batch_size", type=int, default=16)
 	parser.add_argument("--epochs", type=int, default=50)
-	parser.add_argument("--n_samples", type=int, default=1000)
+	parser.add_argument("--vq_type", type=str, choices=["vq", "ema"], default='ema')
 	parser.add_argument("--step", type=str, default='train')
 	parser.add_argument("--data_dir", type=pathlib.Path, default="./data/CIFAR10")
 	parser.add_argument("--model_dir", type=pathlib.Path, default="./model_data/vqvae")
@@ -67,6 +67,82 @@ class VectorQuantizer(nn.Module):
 		# straight-through estimator
 		return inputs + (quantized - inputs).detach(), quantized
 
+class EMAVectorQuantizer(nn.Module):
+	def __init__(self, num_embeddings, embedding_dim, decay=0.99):
+		super(EMAVectorQuantizer, self).__init__()
+
+		self.num_embeddings = num_embeddings
+		self.embedding_dim = embedding_dim
+		self.decay = decay
+
+		self.embedding = nn.Embedding(self.num_embeddings, self.embedding_dim)
+		self.embedding.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
+
+		self.ema_embedding_num = torch.zeros(self.num_embeddings,requires_grad=False)
+
+	def forward(self, inputs):
+
+		emb_shape = self.embedding.weight.shape
+
+		'''
+		 Calculate L2 norm between inputs and embedding(E = embedding_dim, N = num_embeddings)
+		 1. reshape inputs to 16 * 256 * 8 * 8 * 1 (BCHW*1)
+		 2. permute embedding 512 * 256 -> 256 * 512 (NE -> EN)
+		 3. reshape embedding to 256 * 1 * 1 * 512 (E * 1 * 1 * N)
+		 4. boradcast embedding to 16 * 256 * 8 * 8 * 512 (BEHWN)
+		 5. calculate L2 norm for dim=1, the resulting shape 16 * 8 * 8 * 512 (BHWN)
+		'''
+		distances = torch.norm(inputs.unsqueeze(-1) - self.embedding.weight.permute(1,0).view(emb_shape[-1],1,1,emb_shape[0]), 2, 1)
+
+		# the argmin indices for last dim(16 * 8 * 8)
+		encoding_indices = torch.argmin(distances, -1).long()
+
+		# shape 16 * 8 * 8 * 256(BHWC)
+		shifted_shape = [inputs.shape[0], * list(inputs.shape[2:]), inputs.shape[1]]
+
+		if self.training:
+			
+			flat_encoding = encoding_indices.view(-1,1)
+
+			unique_indices = torch.unique(flat_encoding.view(-1))
+
+			# 1024 * 512 one-hot embedding
+			ema_onehot = torch.zeros(flat_encoding.shape[0], self.num_embeddings)
+			ema_onehot.scatter_(1,flat_encoding,torch.ones_like(flat_encoding).type_as(ema_onehot))
+
+			# EMA number updating
+			shadow_num = self.ema_embedding_num.index_select(0, unique_indices)
+			new_num = ema_onehot.index_select(1, unique_indices)
+
+			self.ema_embedding_num[unique_indices]  = self.decay * shadow_num  + (1 - self.decay) * torch.sum(new_num, 0)
+
+			# retrieve shadow embedding
+			shadow_embedding = self.embedding.weight.index_select(0,unique_indices)
+
+			# sum the new embeddings from encoder
+			# matmul: (1024 * 1 * 512) x (1024 * 256 * 1) => 1024 * 512 * 256
+			# sum: 512 * 256
+			new_embedding = (inputs.permute(0, 2, 3, 1).reshape(-1,1,self.embedding_dim) * ema_onehot.unsqueeze(-1)).sum(0)
+			new_embedding = new_embedding.index_select(0, unique_indices)
+
+			# EMA embedding updating
+			ema_embedding = self.decay * shadow_embedding + (1 - self.decay) * new_embedding
+
+			ema_embedding = ema_embedding/(self.ema_embedding_num[unique_indices].unsqueeze(-1) + 1e-6)
+
+			# update embedding dict
+			self.embedding.weight.detach()[unique_indices,:] = ema_embedding
+
+		'''
+		1. index_select shape 1024 * 256 (B*H*W) x C
+		2. reshape to 16 * 8 * 8 * 256(BHWC)
+		3. permute to 16 * 256 * 8 * 8(BCHW)
+		'''
+		quantized = self.embedding.weight.index_select(0,encoding_indices.view(-1)).view(shifted_shape).permute(0, 3, 1, 2)
+
+		# straight-through estimator
+		return inputs + (quantized - inputs).detach(), quantized
+
 class ResBlock(nn.Module):
 	def __init__(self, in_channels, out_channels, bn=False):
 		super(ResBlock, self).__init__()
@@ -86,7 +162,7 @@ class ResBlock(nn.Module):
 		return x + self.convs(x)
 
 class VQ_VAE(nn.Module):
-	def __init__(self, hidden_size=256, num_embeddings=512, embedding_dim=256, bn=True, vq_coef=1, commit_coef=0.5, num_channels=3):
+	def __init__(self, hidden_size=256, num_embeddings=512, embedding_dim=256, vq_type='ema' ,bn=True, vq_coef=1, commit_coef=0.5, num_channels=3):
 		super(VQ_VAE,self).__init__()
 
 		# encoder
@@ -115,7 +191,9 @@ class VQ_VAE(nn.Module):
 			nn.Tanh()
 		)
 
-		self.quantizer = VectorQuantizer(num_embeddings,embedding_dim)
+		quantizer_class = EMAVectorQuantizer if vq_type=='ema' else VectorQuantizer
+
+		self.quantizer = quantizer_class(num_embeddings,embedding_dim) 
 
 		self.vq_coef = vq_coef
 		self.commit_coef = commit_coef
@@ -136,7 +214,7 @@ class VQ_VAE(nn.Module):
 
 		vq_loss = torch.mean(torch.norm(quantized - z_e, 2, 1))
 
-		# the loss is identical to which introduced in VQVAE paper
+		# the loss is identical to that introduced in origin VQVAE paper
 		loss = mse_loss + (self.vq_coef + self.commit_coef) * vq_loss 
 
 		return loss, mse_loss, vq_loss
@@ -158,7 +236,7 @@ def train():
 
 	validation_loader = DataLoader(validation_data,batch_size=cfg.batch_size,shuffle=True,pin_memory=True)
 
-	model = VQ_VAE(hidden_size=cfg.hidden_size, num_embeddings=cfg.num_embeddings, embedding_dim=cfg.embedding_dim)
+	model = VQ_VAE(hidden_size=cfg.hidden_size, num_embeddings=cfg.num_embeddings, embedding_dim=cfg.embedding_dim, vq_type = cfg.vq_type)
 
 	model.to(device)
 
