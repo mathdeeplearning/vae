@@ -24,52 +24,13 @@ def add_args(parser):
 	parser.add_argument("--epochs", type=int, default=50)
 	parser.add_argument("--vq_type", type=str, choices=["vq", "ema"], default='ema')
 	parser.add_argument("--step", type=str, default='train')
+	parser.add_argument("--decay", type=float, default=0.99)
 	parser.add_argument("--data_dir", type=pathlib.Path, default="./data/CIFAR10")
 	parser.add_argument("--model_dir", type=pathlib.Path, default="./model_data/vqvae")
 
 class VectorQuantizer(nn.Module):
-	def __init__(self, num_embeddings, embedding_dim):
-		super(VectorQuantizer, self).__init__()
-
-		self.num_embeddings = num_embeddings
-		self.embedding_dim = embedding_dim
-
-		self.embedding = nn.Embedding(self.num_embeddings, self.embedding_dim)
-		self.embedding.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
-
-	def forward(self, inputs):
-
-		emb_shape = self.embedding.weight.shape
-
-		'''
-		 Calculate L2 norm between inputs and embedding(E = embedding_dim, N = num_embeddings)
-		 1. reshape inputs to 16 * 256 * 8 * 8 * 1 (BCHW*1)
-		 2. permute embedding 512 * 256 -> 256 * 512 (NE -> EN)
-		 3. reshape embedding to 256 * 1 * 1 * 512 (E * 1 * 1 * N)
-		 4. boradcast embedding to 16 * 256 * 8 * 8 * 512 (BEHWN)
-		 5. calculate L2 norm for dim=1, the resulting shape 16 * 8 * 8 * 512 (BHWN)
-		'''
-		distances = torch.norm(inputs.unsqueeze(-1) - self.embedding.weight.permute(1,0).view(emb_shape[-1],1,1,emb_shape[0]), 2, 1)
-
-		# the argmin indices for last dim(16 * 8 * 8)
-		encoding_indices = torch.argmin(distances, -1)
-
-		# shape 16 * 8 * 8 * 256(BHWC)
-		shifted_shape = [inputs.shape[0], * list(inputs.shape[2:]), inputs.shape[1]]
-
-		'''
-		1. index_select shape 1024 * 256 (B*H*W) x C
-		2. reshape to 16 * 8 * 8 * 256(BHWC)
-		3. permute to 16 * 256 * 8 * 8(BCHW)
-		'''
-		quantized = self.embedding.weight.index_select(0,encoding_indices.view(-1)).view(shifted_shape).permute(0, 3, 1, 2)
-
-		# straight-through estimator
-		return inputs + (quantized - inputs).detach(), quantized
-
-class EMAVectorQuantizer(nn.Module):
 	def __init__(self, num_embeddings, embedding_dim, decay=0.99):
-		super(EMAVectorQuantizer, self).__init__()
+		super(VectorQuantizer, self).__init__()
 
 		self.num_embeddings = num_embeddings
 		self.embedding_dim = embedding_dim
@@ -97,29 +58,11 @@ class EMAVectorQuantizer(nn.Module):
 		# the argmin indices for last dim (16 * 8 * 8) * 1 => 1024 * 1
 		encoding_indices = torch.argmin(distances, -1).view(-1,1).long()
 
+		# EMA updating
+		if self.training and self.decay > 0: self.ema_update(inputs, encoding_indices)
+
 		# shape 16 * 8 * 8 * 256(BHWC)
-		shifted_shape = [inputs.shape[0], * list(inputs.shape[2:]), inputs.shape[1]]
-
-		'''
-		For the compution efficiency, the implementation is slightly differ from VQ-VAE papaer, 
-		that it updates all embeddings in one minibatch. It makes sense for the large batch size,
-		where all embeddings will be selected with high probability. 
-		'''
-		if self.training:
-			
-			# 1024 * 512 one-hot
-			ema_onehot = torch.zeros(encoding_indices.numel(), self.num_embeddings).long()
-
-			ema_onehot.scatter_(1,encoding_indices,torch.ones_like(encoding_indices))
-
-			self.embedding_num = self.decay * self.embedding_num  + (1 - self.decay) * ema_onehot.sum(0)
-
-			# broadcast: (1024 * 1 * 512) x (1024 * 256 * 1) => 1024 * 512 * 256
-			new_embedding = (inputs.permute(0, 2, 3, 1).reshape(-1,1,self.embedding_dim) * ema_onehot.unsqueeze(-1))
-
-			ema_embedding = self.decay * self.embedding.weight + (1 - self.decay) * new_embedding.sum(0)
-
-			self.embedding.weight = nn.Parameter(ema_embedding / (self.embedding_num.unsqueeze(-1) + 1e-6))
+		shifted_shape = inputs.permute(0, 2, 3, 1).shape
 
 		'''
 		1. index_select shape 1024 * 256 (B*H*W) x C
@@ -130,6 +73,26 @@ class EMAVectorQuantizer(nn.Module):
 
 		# straight-through estimator
 		return inputs + (quantized - inputs).detach(), quantized
+
+	def ema_update(self, inputs, encoding_indices):
+		'''
+		For the compution efficiency, the implementation is slightly differ from VQ-VAE papaer, 
+		that it updates all embeddings in one minibatch. It makes sense for the large batch size,
+		where all embeddings will be selected with high probability. 
+		'''			
+		# 1024 * 512 one-hot
+		ema_onehot = torch.zeros(encoding_indices.numel(), self.num_embeddings).long()
+
+		ema_onehot.scatter_(1,encoding_indices,torch.ones_like(encoding_indices))
+
+		self.embedding_num = self.decay * self.embedding_num  + (1 - self.decay) * ema_onehot.sum(0)
+
+		# broadcast: (1024 * 1 * 512) x (1024 * 256 * 1) => 1024 * 512 * 256
+		new_embedding = (inputs.permute(0, 2, 3, 1).reshape(-1,1,self.embedding_dim) * ema_onehot.unsqueeze(-1))
+
+		ema_embedding = self.decay * self.embedding.weight + (1 - self.decay) * new_embedding.sum(0)
+
+		self.embedding.weight = nn.Parameter(ema_embedding / (self.embedding_num.unsqueeze(-1) + 1e-6))	
 
 class ResBlock(nn.Module):
 	def __init__(self, in_channels, out_channels, bn=False):
@@ -179,9 +142,7 @@ class VQ_VAE(nn.Module):
 			nn.Tanh()
 		)
 
-		quantizer_class = EMAVectorQuantizer if vq_type=='ema' else VectorQuantizer
-
-		self.quantizer = quantizer_class(num_embeddings,embedding_dim) 
+		self.quantizer = VectorQuantizer(num_embeddings,embedding_dim, cfg.decay) 
 
 		self.vq_coef = vq_coef
 		self.commit_coef = commit_coef
