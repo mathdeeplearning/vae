@@ -136,29 +136,29 @@ class VAE(nn.Module):
 		# loglikelihood - KL = -ELBO
 		return loglikelihood - self.KL(encoder_mu,encoder_logvar)
 
-	'''
-		Bernoulli distribution log-likelihood(AEVE Page11 C.1)
-
-		Bernoulli的log似然与二分类交叉熵只差一个负号，decoder与其他生成模型一致
-	'''
 	def bernoulli_loglikelihood(self, x, decoded_x):
+		'''
+			Bernoulli distribution log-likelihood(AEVE Page11 C.1)
+
+			Bernoulli的log似然与二分类交叉熵只差一个负号，decoder与其他生成模型一致
+		'''
 		return F.binary_cross_entropy(input=decoded_x.view(-1, 784), target=x.view(-1, 784), reduction='sum')
 
-	'''
-		Gaussian distribution log-likelihood(AEVB Page11 C.2)
-
-		AEVB中提到，少量的隐变量可以收敛，隐变量过多不收敛。高斯分布需要设置与输入同等维度的隐变量，
-		经过训练过程并不收敛，具体表现为均值方差的参数很快变为nan；把网络设计的更复杂也可能收敛
-	'''
 	def gaussian_loglikelihood(self,x, mu, logvar):
+		'''
+			Gaussian distribution log-likelihood(AEVB Page11 C.2)
+
+			AEVB中提到，少量的隐变量可以收敛，隐变量过多不收敛。高斯分布需要设置与输入同等维度的隐变量，
+			经过训练过程并不收敛，具体表现为均值方差的参数很快变为nan；把网络设计的更复杂也可能收敛
+		'''
 		return - 0.5 * torch.matmul((x - mu) * torch.exp( -logvar) , (x - mu).T).sum() - 0.5* 0.5 * 784 * torch.abs(torch.sum(logvar))
 
-	'''
-		KL Divergence(AEVB Page5)
-
-		KL计算仅依赖均值方差
-	'''
 	def KL(self, mu, logvar):
+		'''
+			KL Divergence(AEVB Page5)
+
+			KL计算仅依赖均值方差
+		'''
 		return 0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
 def train():
@@ -221,11 +221,13 @@ def generate():
 
 	model_num = last_model_num(cfg.model_dir)
 
+	assert model_num is not None, "Not found models from {}".format(cfg.model_dir)
+
 	model_path = os.path.join(cfg.model_dir,"vae-{}.model".format(model_num))
 
 	vae.load_state_dict(torch.load(model_path))
 
-	print("Loaded model from " + model_path)
+	print("Loaded model: " + model_path)
 
 	vae.eval()
 
