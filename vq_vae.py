@@ -42,8 +42,8 @@ class VectorQuantizer(nn.Module):
 		'''
 		distances = torch.norm(inputs.unsqueeze(-1) - self.embedding.weight.permute(1,0).view(emb_shape[-1],1,1,emb_shape[0]), 2, 1)
 
-		# the argmin indices for last dim (16 * 8 * 8) * 1 => 1024 * 1
-		encoding_indices = torch.argmin(distances, -1).view(-1,1).long()
+		# the argmin indices for last dim (16 , 8 , 8) => (1024)
+		encoding_indices = torch.argmin(distances, -1).view(-1).long()
 
 		# EMA updating
 		if self.training and self.decay > 0: self.ema_update(inputs, encoding_indices)
@@ -56,7 +56,7 @@ class VectorQuantizer(nn.Module):
 		2. reshape to 16 * 8 * 8 * 256(BHWC)
 		3. permute to 16 * 256 * 8 * 8(BCHW)
 		'''
-		quantized = self.embedding.weight.index_select(0,encoding_indices.view(-1)).view(shifted_shape).permute(0, 3, 1, 2)
+		quantized = self.embedding.weight.index_select(0,encoding_indices).view(shifted_shape).permute(0, 3, 1, 2)
 
 		# straight-through estimator
 		return inputs + (quantized - inputs).detach(), quantized
@@ -68,9 +68,7 @@ class VectorQuantizer(nn.Module):
 		where all embeddings will be selected with high probability. 
 		'''			
 		# 1024 * 512 one-hot
-		ema_onehot = torch.zeros(encoding_indices.numel(), self.num_embeddings).long()
-
-		ema_onehot.scatter_(1,encoding_indices,torch.ones_like(encoding_indices))
+		ema_onehot = F.one_hot(encoding_indices, self.num_embeddings)
 
 		self.embedding_num = self.decay * self.embedding_num  + (1 - self.decay) * ema_onehot.sum(0)
 
@@ -230,7 +228,7 @@ def add_args(parser):
 	parser.add_argument("--decay", type=float, default=0.99)
 	parser.add_argument("--data_dir", type=pathlib.Path, default="./data/CIFAR10")
 	parser.add_argument("--model_dir", type=pathlib.Path, default="./model_data/vqvae")
-	
+
 if __name__ == '__main__':
 	
 	parser = argparse.ArgumentParser()
