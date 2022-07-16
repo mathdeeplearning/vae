@@ -15,19 +15,6 @@ import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 from torchvision.utils import make_grid
 
-def add_args(parser):
-	parser.add_argument("--embedding_dim", type=int, default=256)
-	parser.add_argument("--num_embeddings", type=int, default=512)
-	parser.add_argument("--hidden_size", type=int, default=256)
-	parser.add_argument("--learning_rate", type=float, default=1e-3)
-	parser.add_argument("--batch_size", type=int, default=16)
-	parser.add_argument("--epochs", type=int, default=50)
-	parser.add_argument("--vq_type", type=str, choices=["vq", "ema"], default='ema')
-	parser.add_argument("--step", type=str, default='train')
-	parser.add_argument("--decay", type=float, default=0.99)
-	parser.add_argument("--data_dir", type=pathlib.Path, default="./data/CIFAR10")
-	parser.add_argument("--model_dir", type=pathlib.Path, default="./model_data/vqvae")
-
 class VectorQuantizer(nn.Module):
 	def __init__(self, num_embeddings, embedding_dim, decay=0.99):
 		super(VectorQuantizer, self).__init__()
@@ -88,29 +75,11 @@ class VectorQuantizer(nn.Module):
 		self.embedding_num = self.decay * self.embedding_num  + (1 - self.decay) * ema_onehot.sum(0)
 
 		# broadcast: (1024 * 1 * 512) x (1024 * 256 * 1) => 1024 * 512 * 256
-		new_embedding = (inputs.permute(0, 2, 3, 1).reshape(-1,1,self.embedding_dim) * ema_onehot.unsqueeze(-1))
+		new_embedding = inputs.permute(0, 2, 3, 1).reshape(-1,1,self.embedding_dim) * ema_onehot.unsqueeze(-1)
 
 		ema_embedding = self.decay * self.embedding.weight + (1 - self.decay) * new_embedding.sum(0)
 
 		self.embedding.weight = nn.Parameter(ema_embedding / (self.embedding_num.unsqueeze(-1) + 1e-6))	
-
-class ResBlock(nn.Module):
-	def __init__(self, in_channels, out_channels, bn=False):
-		super(ResBlock, self).__init__()
-
-		layers = [
-			nn.ReLU(),
-			nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
-			nn.ReLU(),
-			nn.Conv2d(out_channels, out_channels, kernel_size=1, stride=1, padding=0)
-		]
-		if bn:
-			layers.insert(2, nn.BatchNorm2d(out_channels))
-
-		self.convs = nn.Sequential(*layers)
-
-	def forward(self, x):
-		return x + self.convs(x)
 
 class VQ_VAE(nn.Module):
 	def __init__(self, hidden_size=256, num_embeddings=512, embedding_dim=256, vq_type='ema' ,bn=True, vq_coef=1, commit_coef=0.5, num_channels=3):
@@ -167,6 +136,24 @@ class VQ_VAE(nn.Module):
 		loss = mse_loss + (self.vq_coef + self.commit_coef) * vq_loss 
 
 		return loss, mse_loss, vq_loss
+
+class ResBlock(nn.Module):
+	def __init__(self, in_channels, out_channels, bn=False):
+		super(ResBlock, self).__init__()
+
+		layers = [
+			nn.ReLU(),
+			nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
+			nn.ReLU(),
+			nn.Conv2d(out_channels, out_channels, kernel_size=1, stride=1, padding=0)
+		]
+		if bn:
+			layers.insert(2, nn.BatchNorm2d(out_channels))
+
+		self.convs = nn.Sequential(*layers)
+
+	def forward(self, x):
+		return x + self.convs(x)
 
 def train():
 	training_data = datasets.CIFAR10(root=cfg.data_dir, train=True, download=True,
@@ -231,6 +218,19 @@ def train():
 
 		torch.save(model.state_dict(),model_path)	
 
+def add_args(parser):
+	parser.add_argument("--embedding_dim", type=int, default=256)
+	parser.add_argument("--num_embeddings", type=int, default=512)
+	parser.add_argument("--hidden_size", type=int, default=256)
+	parser.add_argument("--learning_rate", type=float, default=1e-3)
+	parser.add_argument("--batch_size", type=int, default=16)
+	parser.add_argument("--epochs", type=int, default=50)
+	parser.add_argument("--vq_type", type=str, choices=["vq", "ema"], default='ema')
+	parser.add_argument("--step", type=str, default='train')
+	parser.add_argument("--decay", type=float, default=0.99)
+	parser.add_argument("--data_dir", type=pathlib.Path, default="./data/CIFAR10")
+	parser.add_argument("--model_dir", type=pathlib.Path, default="./model_data/vqvae")
+	
 if __name__ == '__main__':
 	
 	parser = argparse.ArgumentParser()
