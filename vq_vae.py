@@ -78,7 +78,7 @@ class EMAVectorQuantizer(nn.Module):
 		self.embedding = nn.Embedding(self.num_embeddings, self.embedding_dim)
 		self.embedding.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
 
-		self.ema_embedding_num = torch.zeros(self.num_embeddings,requires_grad=False)
+		self.embedding_num = torch.zeros(self.num_embeddings)
 
 	def forward(self, inputs):
 
@@ -94,44 +94,32 @@ class EMAVectorQuantizer(nn.Module):
 		'''
 		distances = torch.norm(inputs.unsqueeze(-1) - self.embedding.weight.permute(1,0).view(emb_shape[-1],1,1,emb_shape[0]), 2, 1)
 
-		# the argmin indices for last dim(16 * 8 * 8)
-		encoding_indices = torch.argmin(distances, -1).long()
+		# the argmin indices for last dim (16 * 8 * 8) * 1 => 1024 * 1
+		encoding_indices = torch.argmin(distances, -1).view(-1,1).long()
 
 		# shape 16 * 8 * 8 * 256(BHWC)
 		shifted_shape = [inputs.shape[0], * list(inputs.shape[2:]), inputs.shape[1]]
 
+		'''
+		For the compution efficiency, the implementation is slightly differ from VQ-VAE papaer, 
+		that it updates all embeddings in one minibatch. It makes sense for the large batch size,
+		where all embeddings will be selected with high probability. 
+		'''
 		if self.training:
 			
-			flat_encoding = encoding_indices.view(-1,1)
+			# 1024 * 512 one-hot
+			ema_onehot = torch.zeros(encoding_indices.numel(), self.num_embeddings).long()
 
-			unique_indices = torch.unique(flat_encoding.view(-1))
+			ema_onehot.scatter_(1,encoding_indices,torch.ones_like(encoding_indices))
 
-			# 1024 * 512 one-hot embedding
-			ema_onehot = torch.zeros(flat_encoding.shape[0], self.num_embeddings)
-			ema_onehot.scatter_(1,flat_encoding,torch.ones_like(flat_encoding).type_as(ema_onehot))
+			self.embedding_num = self.decay * self.embedding_num  + (1 - self.decay) * ema_onehot.sum(0)
 
-			# EMA number updating
-			shadow_num = self.ema_embedding_num.index_select(0, unique_indices)
-			new_num = ema_onehot.index_select(1, unique_indices)
+			# broadcast: (1024 * 1 * 512) x (1024 * 256 * 1) => 1024 * 512 * 256
+			new_embedding = (inputs.permute(0, 2, 3, 1).reshape(-1,1,self.embedding_dim) * ema_onehot.unsqueeze(-1))
 
-			self.ema_embedding_num[unique_indices]  = self.decay * shadow_num  + (1 - self.decay) * torch.sum(new_num, 0)
+			ema_embedding = self.decay * self.embedding.weight + (1 - self.decay) * new_embedding.sum(0)
 
-			# retrieve shadow embedding
-			shadow_embedding = self.embedding.weight.index_select(0,unique_indices)
-
-			# sum the new embeddings from encoder
-			# matmul: (1024 * 1 * 512) x (1024 * 256 * 1) => 1024 * 512 * 256
-			# sum: 512 * 256
-			new_embedding = (inputs.permute(0, 2, 3, 1).reshape(-1,1,self.embedding_dim) * ema_onehot.unsqueeze(-1)).sum(0)
-			new_embedding = new_embedding.index_select(0, unique_indices)
-
-			# EMA embedding updating
-			ema_embedding = self.decay * shadow_embedding + (1 - self.decay) * new_embedding
-
-			ema_embedding = ema_embedding/(self.ema_embedding_num[unique_indices].unsqueeze(-1) + 1e-6)
-
-			# update embedding dict
-			self.embedding.weight.detach()[unique_indices,:] = ema_embedding
+			self.embedding.weight = nn.Parameter(ema_embedding / (self.embedding_num.unsqueeze(-1) + 1e-6))
 
 		'''
 		1. index_select shape 1024 * 256 (B*H*W) x C
