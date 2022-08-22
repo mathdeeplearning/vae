@@ -5,6 +5,7 @@ import re
 import argparse
 import pathlib
 import matplotlib.pyplot as plt
+import shutil
 
 import numpy as np
 import torch
@@ -22,77 +23,32 @@ import torchviz
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class VectorQuantizer(nn.Module):
-	def __init__(self, num_embeddings, embedding_dim, decay=0.99):
+	def __init__(self, num_hiddens, num_embeddings, embedding_dim):
 		super(VectorQuantizer, self).__init__()
 
 		self.num_embeddings = num_embeddings
 		self.embedding_dim = embedding_dim
-		self.decay = decay
 
 		self.embedding = nn.Embedding(self.num_embeddings, self.embedding_dim).to(device)
-		# self.embedding.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
 		self.embedding.weight.data.normal_(0, 0.2)
 
-		if decay >0: self.init_ema()
-
-	def init_ema(self):
-		self.epsilon = 1e-6
-		self.embedding_num_v = torch.arange(self.num_embeddings).unsqueeze(-1).to(device)
-		self.embedding.weight.requires_grad_(False)
-		self.register_buffer('shadow_size', torch.zeros(self.num_embeddings))
-		self.register_buffer('shadow_embedding', torch.Tensor(self.num_embeddings, self.embedding_dim))
+		self.logits_proj = nn.Conv2d(num_hiddens, self.num_embeddings, 1)
 
 	def forward(self, inputs):
 
-		emb_shape = self.embedding.weight.shape
+		# (16, 256, 8, 8) -> (16, 512, 8, 8)
+		# (B, C, H, W) -> (B, N, H, W)
+		logits = self.logits_proj(inputs)
 
-		r'''
-		 Calculate L2 norm between inputs and embedding
+		# (B, N, H, W)
+		logits_onehot = F.gumbel_softmax(logits, tau=cfg.tau, hard=cfg.hard)
 
-		 B: Batch Size, C: Channel, H: Height, W: Width, E: embedding_dim, N: num_embeddings
+		# (16, 512, 8, 8) * (512, 256) -> (16, 256, 8, 8)
+		quantized = torch.einsum('B N H W, N E -> B E H W',logits_onehot, self.embedding.weight)
 
-		 1. reshape inputs to 		(B, C, H, W, 1)	 => (16, 256, 8, 8, 1) 
-		 2. permute embedding 		(N, E) -> (E, N) => (512, 256) -> (256, 512) 
-		 3. reshape embedding to 	(E, 1, 1, N)	 => (256, 1, 1, 512) 
-		 4. boradcast embedding to 	(B, E, H, W, N)	 => (16, 256, 8, 8, 512) 
-		 5. L2 norm shape 			(B, H, W, N)	 => (16, 8, 8, 512) 
-		'''
-		distances = torch.norm(inputs.unsqueeze(-1) - self.embedding.weight.permute(1,0).view(emb_shape[-1],1,1,emb_shape[0]), 2, 1)
+		perplexity = torch.exp(torch.special.entr(logits_onehot.view(-1, self.num_embeddings).sum(0)/(logits_onehot.sum() + 1e-10)).sum())
 
-		# the argmin indices (16 , 8 , 8) => (1024,)
-		encoding_indices = torch.argmin(distances, -1).view(-1).long()
-
-		# 1024 * 512 one-hot
-		ema_onehot = F.one_hot(encoding_indices, self.num_embeddings).type_as(inputs).to(device)
-
-		# (1024, 512) * (512, 256) -> (1024, 256) -> (16, 8, 8, 256) -> (16, 256, 8, 8)
-		quantized = torch.matmul(ema_onehot, self.embedding.weight).view(inputs.shape[0], *inputs.shape[2:], inputs.shape[1]).permute(0, 3, 1, 2).contiguous()
-
-		# EMA updating
-		if self.training and self.decay > 0: self.ema_update(inputs, torch.unique(encoding_indices), ema_onehot)
-		
-		perplexity = torch.exp(torch.special.entr(ema_onehot.sum(0)/(ema_onehot.sum() + 1e-10)).sum())
-
-		# straight-through estimator
-		return inputs + (quantized - inputs).detach(), quantized, perplexity
-
-	@torch.no_grad()
-	def ema_update(self, inputs, unique_indices, ema_onehot):
-
-		# (512, 1) == (1, N) =>(512, N) => (512,) bool tensor
-		need_indices = (self.embedding_num_v == unique_indices.view(1,-1)).sum(1).bool()
-
-		need_new_size = torch.sum(ema_onehot, 0)[need_indices]
-
-		self.shadow_size[need_indices] = self.decay * self.shadow_size[need_indices] + (1 - self.decay) * need_new_size
-
-		# (512, 256)
-		need_new_embedding = torch.matmul(ema_onehot.t(), inputs.view(-1, self.embedding_dim))
-
-		self.shadow_embedding[need_indices] = self.decay * self.shadow_embedding[need_indices] + (1 - self.decay) * need_new_embedding[need_indices]
-
-		# updating weight
-		self.embedding.weight[need_indices] = self.shadow_embedding[need_indices] / need_new_size.unsqueeze(-1)
+		return quantized, perplexity
 
 class VQ_VAE(nn.Module):
 	def __init__(self, hidden_size=256, num_embeddings=512, embedding_dim=256, vq_type='ema' ,bn=True, vq_coef=1, commit_coef=0.25, num_channels=3):
@@ -124,40 +80,33 @@ class VQ_VAE(nn.Module):
 			nn.Tanh()
 		)
 
-		self.quantizer = VectorQuantizer(num_embeddings,embedding_dim, cfg.decay if vq_type =='ema' else 0)
+		self.quantizer = VectorQuantizer(hidden_size,num_embeddings,embedding_dim)
 
 		self.vq_type = vq_type
-		self.vq_coef = 0 if vq_type=='ema' else vq_coef
+		self.vq_coef = vq_coef
 		self.commit_coef = commit_coef
 		self.model_dir = cfg.model_dir
+		self.cycle_num = 1
 
 		for l in self.modules():
 			if isinstance(l, nn.Linear) or isinstance(l, nn.Conv2d):
 				l.weight.detach().normal_(0, 0.2)
 				nn.init.constant_(l.bias, 0)
 
-		# self.encoder[-1].weight.detach().fill_(1 / 40)
-
 
 	def forward(self, x):
 		z_e = self.encoder(x)
 
 		# vq
-		z_q, quantized, perplexity = self.quantizer(z_e)
+		quantized, perplexity = self.quantizer(z_e)
 
 		# decode
-		decoded_x = self.decoder(z_q)
+		decoded_x = self.decoder(quantized)
 
 		return decoded_x, z_e, quantized, perplexity
 
 	def loss(self, x, decoded_x, z_e, quantized):
-
-		mse_loss = F.mse_loss(decoded_x, x)
-		vq_loss = F.mse_loss(quantized , z_e.detach())
-		commit_loss = F.mse_loss(quantized.detach() , z_e)
-
-		loss = mse_loss + self.vq_coef * vq_loss + self.commit_coef * commit_loss
-		return loss, mse_loss, vq_loss
+		return F.mse_loss(decoded_x, x)
 
 	def sample(self, size):
 		indices = torch.randint(self.quantizer.num_embeddings, (size * 64,))
@@ -252,7 +201,7 @@ class Trainer(object):
 
 			decoded_x, z_e, quantized, perplexity = self.model(x)
 
-			loss, mse, vq_loss = self.model.loss(x, decoded_x, z_e, quantized)
+			loss = self.model.loss(x, decoded_x, z_e, quantized)
 								
 			loss.backward()
 
@@ -265,8 +214,8 @@ class Trainer(object):
 			
 			number_of_batches += 1
 
-			if number_of_batches % 100 == 0:
-				print(f'Tranin epoch: {epoch} iter: {number_of_batches}','perplexity=%.3f, loss=%.3f(%.3f,%.3f)'% (perplexity,loss.item(),mse.item(),vq_loss.item()))
+			if number_of_batches % 10 == 0:
+				print(f'Tranin epoch: {epoch} iter: {number_of_batches}','perplexity=%.3f, loss=%.3f'% (perplexity,loss.item()))
 
 		losses[-1] /= number_of_batches
 
@@ -303,7 +252,7 @@ class Trainer(object):
 					write_image('reconstructed/test', decoded_x.mul(0.5).add(0.5))
 					reconstructed = True
 
-				outputs = [l.cpu().item() for l in outputs]
+				outputs = [outputs.item()]
 
 				losses += np.array(outputs)
 
@@ -335,7 +284,7 @@ def init_args(parser):
 	parser.add_argument("--num_embeddings", type=int, default=512)
 	parser.add_argument("--hidden_size", type=int, default=256)
 	parser.add_argument("--learning_rate", type=float, default=2e-4)
-	parser.add_argument("--batch_size", type=int, default=64)
+	parser.add_argument("--batch_size", type=int, default=16)
 	parser.add_argument("--test_batch_size", type=int, default=64)
 	parser.add_argument("--epochs", type=int, default=1)
 	parser.add_argument("--vq_type", type=str, choices=["vq", "ema"], default='vq')
@@ -344,6 +293,9 @@ def init_args(parser):
 	parser.add_argument("--data_dir", type=pathlib.Path, default="./data/CIFAR10")
 	parser.add_argument("--model_dir", type=pathlib.Path, default="./model_data/vq_vae")
 	parser.add_argument("--log_dir", type=pathlib.Path, default="./log/vq_vae")
+	parser.add_argument("--tau", type=float, default=0.9)
+	parser.add_argument("--hard", type=bool, default=True)
+	parser.add_argument("--version", type=pathlib.Path, default="1.0")
 
 def data_loader(data_dir, batch_size, train):
 	dataset = datasets.CIFAR10(root= data_dir, 
@@ -355,14 +307,29 @@ def data_loader(data_dir, batch_size, train):
 								]))
 	return DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True)	
 
+def init_env(clean = True):
+	script_name = os.path.splitext(os.path.basename(__file__))[0]
+	cfg.model_dir = os.path.join(cfg.model_dir, script_name, cfg.version)
+	cfg.log_dir = os.path.join(cfg.log_dir, script_name, cfg.version)
+
+	clean_dir = lambda d: shutil.rmtree(d) if os.path.exists(d) else None
+
+	clean_dir(cfg.model_dir)
+	print("Clean ", cfg.model_dir)
+
+	clean_dir(cfg.log_dir)
+	print("Clean ", cfg.log_dir)
+
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
 	init_args(parser)
 	cfg = parser.parse_args()
 
+	init_env()
+
 	# device = torch.device('mps')
 
-	print('device={}, vq_type={}'.format(device,cfg.vq_type))
+	print('device={}, log_dir={}, model_dir={}'.format(device,cfg.log_dir,cfg.log_dir))
 
 	model = VQ_VAE(hidden_size=cfg.hidden_size, num_embeddings=cfg.num_embeddings, embedding_dim=cfg.embedding_dim, vq_type = cfg.vq_type)
 
