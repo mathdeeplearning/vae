@@ -70,13 +70,15 @@ class VaeGMM(object):
 
 		for i in range(self.N//size):
 
-			sns.distplot(data[size*i : (i+1)*size], rug=True)
+			ax = sns.histplot(data[size*i : (i+1)*size], kde=True)
+			sns.rugplot(data[size*i : (i+1)*size], ax=ax)
 
 			x = np.linspace(self.m[i] - 3*self.sigma, self.m[i] + 3*self.sigma, 100)
 
 			plt.plot(x,norm.pdf(x, self.m[i], self.sigma),color='black')
 
-		plt.show()
+		# plt.show()
+		plt.savefig('vi_convergence.png') 
 
 if __name__ == '__main__':
    

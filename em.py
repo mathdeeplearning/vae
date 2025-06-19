@@ -92,13 +92,16 @@ class EMModel(object):
 
 		for i in range(self.N//size):
 
-			sns.distplot(data[size*i : (i+1)*size], rug=True)
+			# sns.histplot(data[size*i : (i+1)*size], rug=True)
+			ax = sns.histplot(data[size*i : (i+1)*size], kde=True)
+			sns.rugplot(data[size*i : (i+1)*size], ax=ax)
 
 			x = np.linspace(self.m[i] - 3*math.sqrt(self.s2[i]), self.m[i] + 3*math.sqrt(self.s2[i]), 100)
 
 			plt.plot(x,norm.pdf(x, self.m[i], math.sqrt(self.s2[i])),color='black')
 
-		plt.show()
+		# plt.show()
+		plt.savefig('em_convergence.png')  # 保存为图片文件
 
 if __name__ == '__main__':
    
